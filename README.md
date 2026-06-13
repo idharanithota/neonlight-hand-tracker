@@ -2,6 +2,10 @@
 
 A real-time hand-tracking visualizer that draws glowing neon skeleton lines over your hands using your webcam — built with **MediaPipe Hands**.
 
+## 🔗 Live Demo
+
+Try it here: https://idharanithota.github.io/neonlight-hand-tracker/
+
 ## Features
 
 - 🖐️ Tracks up to **2 hands** simultaneously
