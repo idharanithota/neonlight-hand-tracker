@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hand Tracking — Neon v2</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; font-family: monospace; }
+  h1 { font-size: 18px; margin-bottom: 16px; color: #fff; letter-spacing: 2px; }
+  #container { position: relative; width: 720px; max-width: 100vw; aspect-ratio: 16/9; background: #000; border-radius: 12px; overflow: hidden; box-shadow: 0 0 40px #ff00ff44; }
+  video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #overlay { position: absolute; top: 10px; left: 10px; font-size: 13px; line-height: 1.9; background: rgba(0,0,0,0.65); padding: 8px 14px; border-radius: 8px; color: #0ff; border: 0.5px solid #0ff4; }
+  button { margin-bottom: 16px; padding: 12px 36px; font-size: 15px; background: #000; color: #0ff; border: 1.5px solid #0ff; border-radius: 8px; cursor: pointer; letter-spacing: 1px; }
+  button:hover { background: #0ff; color: #000; }
+  #msg { font-size: 13px; color: #555; margin-bottom: 14px; }
+</style>
+</head>
+<body>
+<h1>✦ HAND TRACKING — NEON v2 ✦</h1>
+<button id="startBtn">Enable Camera</button>
+<p id="msg">Show both hands for full neon web effect!</p>
+<div id="container">
+  <video id="videoEl" autoplay playsinline muted></video>
+  <canvas id="canvasEl"></canvas>
+  <div id="overlay">
+    <div>Hands: <span id="handsCount">0</span></div>
+    <div>FPS: <span id="fpsEl">--</span></div>
+    <div>Gesture: <span id="gestureEl">--</span></div>
+    <div>Spread: <span id="spreadEl">--%</span></div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js"></script>
+<script>
+const CONNECTIONS=[[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+
+// Cross-hand connections: pairs of landmark indices to connect between hand0 and hand1
+// Connects: wrist, each fingertip, each middle joint, each base knuckle
+const CROSS_PAIRS = [
+  [0, 0],   // wrist to wrist
+  [4, 4],   // thumb tip to thumb tip
+  [3, 3],   // thumb mid
+  [8, 8],   // index tip to index tip
+  [7, 7],   // index mid
+  [6, 6],   // index base
+  [12,12],  // middle tip
+  [11,11],
+  [10,10],
+  [16,16],  // ring tip
+  [15,15],
+  [14,14],
+  [20,20],  // pinky tip
+  [19,19],
+  [18,18],
+  [17,17],
+  [5, 5],   // index knuckle base
+  [9, 9],   // middle knuckle base
+  [13,13],  // ring knuckle base
+];
+
+const CROSS_COLORS = ['#ffffff','#ff00ff','#ff00cc','#ff6600','#ffaa00','#ffff00','#aaff00','#00ff88','#00ffff','#00aaff','#0066ff','#aa00ff','#ff0088','#ff00ff','#00ffcc','#ffcc00','#ff4400','#00ff44','#cc00ff'];
+
+const PALETTES = [
+  ['#ff00ff','#ff0099','#ff6600','#ffff00','#00ff88','#00ccff','#8800ff'],
+  ['#00ffff','#00ff44','#88ff00','#ffee00','#ff8800','#ff0044','#aa00ff']
+];
+
+const video=document.getElementById('videoEl');
+const canvas=document.getElementById('canvasEl');
+const ctx=canvas.getContext('2d');
+let lastTime=performance.now(), fpsSmooth=0, handsResult=[];
+
+function getSpread(lm){
+  const tips=[4,8,12,16,20]; let maxD=0;
+  for(let i=0;i<tips.length;i++) for(let j=i+1;j<tips.length;j++){
+    const a=lm[tips[i]],b=lm[tips[j]];
+    const d=Math.hypot(a.x-b.x,a.y-b.y); if(d>maxD) maxD=d;
+  }
+  return Math.min(100,Math.round(maxD*280));
+}
+
+function getGesture(lm){
+  const tips=[8,12,16,20],base=[6,10,14,18];
+  let ext=tips.filter((t,i)=>lm[t].y<lm[base[i]].y).length;
+  const thumbExt=lm[4].x<lm[3].x;
+  if(ext===4) return 'Open Hand';
+  if(ext===0) return thumbExt?'Thumbs Up 👍':'Fist ✊';
+  if(ext===1&&lm[8].y<lm[6].y) return 'Pointing ☝';
+  if(ext===2&&lm[8].y<lm[6].y&&lm[12].y<lm[10].y) return 'Peace ✌';
+  return 'Custom';
+}
+
+function glowLine(x1,y1,x2,y2,color,width){
+  ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2);
+  ctx.strokeStyle=color; ctx.lineWidth=width+8; ctx.globalAlpha=0.08; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2);
+  ctx.strokeStyle=color; ctx.lineWidth=width+3; ctx.globalAlpha=0.25; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2);
+  ctx.strokeStyle=color; ctx.lineWidth=width; ctx.globalAlpha=1; ctx.stroke();
+}
+
+function glowDot(x,y,color,r){
+  ctx.beginPath(); ctx.arc(x,y,r+6,0,Math.PI*2);
+  ctx.fillStyle=color; ctx.globalAlpha=0.1; ctx.fill();
+  ctx.beginPath(); ctx.arc(x,y,r+2,0,Math.PI*2);
+  ctx.fillStyle=color; ctx.globalAlpha=0.4; ctx.fill();
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2);
+  ctx.fillStyle='#fff'; ctx.globalAlpha=1; ctx.fill();
+  ctx.beginPath(); ctx.arc(x,y,r-1,0,Math.PI*2);
+  ctx.fillStyle=color; ctx.globalAlpha=1; ctx.fill();
+}
+
+function lmToCanvas(p){
+  return [(1-p.x)*canvas.width, p.y*canvas.height];
+}
+
+function draw(){
+  const now=performance.now();
+  fpsSmooth=fpsSmooth*0.85+(1000/(now-lastTime))*0.15; lastTime=now;
+  document.getElementById('fpsEl').textContent=Math.round(fpsSmooth);
+
+  canvas.width=canvas.offsetWidth; canvas.height=canvas.offsetHeight;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.globalAlpha=1;
+
+  if(!handsResult||!handsResult.multiHandLandmarks) return;
+  const hands=handsResult.multiHandLandmarks;
+  document.getElementById('handsCount').textContent=hands.length;
+
+  if(hands.length>0){
+    document.getElementById('gestureEl').textContent=getGesture(hands[0]);
+    document.getElementById('spreadEl').textContent=getSpread(hands[0])+'%';
+  } else {
+    document.getElementById('gestureEl').textContent='--';
+    document.getElementById('spreadEl').textContent='--%';
+  }
+
+  // Draw cross-hand connections FIRST (behind everything)
+  if(hands.length===2){
+    CROSS_PAIRS.forEach(([a,b],ci)=>{
+      const [x1,y1]=lmToCanvas(hands[0][a]);
+      const [x2,y2]=lmToCanvas(hands[1][b]);
+      glowLine(x1,y1,x2,y2, CROSS_COLORS[ci%CROSS_COLORS.length], 1.5);
+    });
+  }
+
+  // Draw each hand skeleton on top
+  hands.forEach((lm, hi)=>{
+    const palette=PALETTES[hi%PALETTES.length];
+    CONNECTIONS.forEach(([a,b],ci)=>{
+      const [x1,y1]=lmToCanvas(lm[a]);
+      const [x2,y2]=lmToCanvas(lm[b]);
+      glowLine(x1,y1,x2,y2, palette[ci%palette.length], 2.5);
+    });
+    lm.forEach((p,i)=>{
+      const [x,y]=lmToCanvas(p);
+      glowDot(x,y, palette[i%palette.length], i===0?6:3.5);
+    });
+  });
+
+  ctx.globalAlpha=1;
+}
+
+document.getElementById('startBtn').addEventListener('click',async()=>{
+  document.getElementById('startBtn').style.display='none';
+  document.getElementById('msg').textContent='Starting camera…';
+  try {
+    const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:1280,height:720}});
+    video.srcObject=stream;
+    await new Promise(r=>video.onloadedmetadata=r);
+    const hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}`});
+    hands.setOptions({maxNumHands:2, modelComplexity:1, minDetectionConfidence:0.6, minTrackingConfidence:0.5});
+    hands.onResults(r=>{ handsResult=r; draw(); });
+    const camera=new Camera(video,{
+      onFrame:async()=>{ await hands.send({image:video}); },
+      width:1280, height:720
+    });
+    camera.start();
+    document.getElementById('msg').textContent='';
+  } catch(e){
+    document.getElementById('msg').textContent='Error: '+e.message;
+    document.getElementById('startBtn').style.display='block';
+  }
+});
+</script>
+</body>
+</html>
